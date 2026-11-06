@@ -1,0 +1,193 @@
+---
+title: "Akapulu Video Avatar"
+sidebarTitle: "Akapulu"
+description: "AkapuluAvatar sends assistant audio to an Akapulu Labs talking avatar that publishes lip-synced video in Daily."
+---
+
+import { CommunityMaintained } from "/snippets/community-maintained.mdx";
+
+<CommunityMaintained
+  maintainer="Akapulu"
+  maintainerUrl="https://github.com/Akapulu"
+  repo="https://github.com/Akapulu/pipecat-akapulu"
+/>
+
+## Overview
+
+`AkapuluAvatar` is a Pipecat processor that sits after your speech model. It
+sends assistant audio to the [Akapulu Labs](https://akapulu.com) worker. That
+worker joins the Daily room already stored on the live session and publishes the
+face and the played audio. The voice bot does not publish camera or microphone.
+
+On `InterruptionFrame`, the processor tells the worker to cut the in-flight
+reply so the avatar can stop speaking when the caller barges in.
+
+<CardGroup cols={2}>
+  <Card
+    title="Source Repository"
+    icon="github"
+    href="https://github.com/Akapulu/pipecat-akapulu"
+  >
+    Source code, examples, and issues for the Akapulu integration
+  </Card>
+  <Card
+    title="PyPI Package"
+    icon="cube"
+    href="https://pypi.org/project/pipecat-akapulu/"
+  >
+    The `pipecat-akapulu` package on PyPI
+  </Card>
+  <Card
+    title="Akapulu Docs"
+    icon="book"
+    href="https://docs.akapulu.com/guides/calls/your-bot"
+  >
+    Create the Daily room, start a live session, and wire `AkapuluAvatar`
+  </Card>
+  <Card title="Akapulu Labs" icon="key" href="https://akapulu.com">
+    Create an account, train an avatar, and get an API key
+  </Card>
+</CardGroup>
+
+## Installation
+
+This is a community-maintained package distributed separately from `pipecat-ai`:
+
+```bash
+uv add pipecat-akapulu
+```
+
+You'll also need Pipecat with Daily and the STT, TTS, and LLM extras you use.
+
+## Prerequisites
+
+### Akapulu Labs account setup
+
+Before using the Akapulu video avatar, you need:
+
+1. **Akapulu API key**: Create an account at [Akapulu Labs](https://akapulu.com)
+2. **Avatar ID**: A trained avatar UUID from your dashboard
+3. **Daily API key**: [Daily](https://dashboard.daily.co) is used to create the
+   room when you call `create_akapulu_call`
+
+You'll also need API keys for the STT, TTS, and LLM services used in your
+pipeline (for example Deepgram, OpenAI, Cartesia).
+
+### Required environment variables
+
+- `AKAPULU_API_KEY`: Your Akapulu Labs API key
+- `DAILY_API_KEY`: Your Daily API key (`create_akapulu_call` reads this)
+
+`AKAPULU_API_URL` is optional. When unset, the processor talks to the Akapulu
+Labs production API.
+
+## Configuration
+
+### `create_akapulu_call`
+
+Run this on your server before the voice bot starts. It creates a private Daily
+room for three participants, mints the browser, voice-bot, and worker tokens,
+and `POST /api/live-sessions/`. It returns `room_url`, `bot_token`,
+`browser_token`, and `session_id`. The worker token is sent to Akapulu Labs and
+is not returned.
+
+<ParamField path="avatar_id" type="str" required>
+  UUID of the trained Akapulu Labs avatar.
+</ParamField>
+
+<ParamField path="show_ai_label" type="bool" required>
+  Whether the worker should show an AI label on the avatar video.
+</ParamField>
+
+<ParamField path="session" type="aiohttp.ClientSession" required>
+  HTTP client session used for Daily and the Akapulu Labs API.
+</ParamField>
+
+<ParamField path="room_exp_secs" type="float" default="7200">
+  Daily room lifetime in seconds. Defaults to two hours. Daily removes everyone
+  when the room expires.
+</ParamField>
+
+A bot that already has a Daily room skips `create_akapulu_call`. Mint the worker
+token and `POST /api/live-sessions/` with `avatar_id`, `show_ai_label`,
+`room_url`, and `avatar_token`. The response is `session_id`.
+
+### `AkapuluAvatar`
+
+Constructor parameters for `AkapuluAvatar`:
+
+<ParamField path="session_id" type="str" required>
+  Live session id returned by `create_akapulu_call` or `POST /api/live-sessions/`.
+</ParamField>
+
+<ParamField path="tail_secs" type="float" default="0">
+  After TTS stop, wait this many seconds of quiet before locking the speaking
+  gate. Another loud chunk restarts the wait. Defaults to `0`.
+</ParamField>
+
+The processor has no runtime-updatable `Settings`. Assistant audio is resampled
+to 24000 Hz mono before it is sent.
+
+<Note>
+  See the [source repository](https://github.com/Akapulu/pipecat-akapulu) for
+  the authoritative, up-to-date list of parameters, loading-status RTVI
+  messages, and the complete example.
+</Note>
+
+## Usage
+
+Leave transport audio out and video out off. The Akapulu Labs worker is the
+Daily publisher for the face and the played audio.
+
+```python
+import aiohttp
+from pipecat.pipeline.pipeline import Pipeline
+from pipecat.transports.daily.transport import DailyParams, DailyTransport
+from pipecat_akapulu import AkapuluAvatar, create_akapulu_call
+
+async with aiohttp.ClientSession() as session:
+    room_url, bot_token, browser_token, session_id = await create_akapulu_call(
+        avatar_id="your-avatar-uuid",
+        show_ai_label=True,
+        session=session,
+    )
+
+    transport = DailyTransport(
+        room_url,
+        bot_token,
+        "Assistant",
+        DailyParams(
+            audio_in_enabled=True,
+            audio_out_enabled=False,
+            video_out_enabled=False,
+        ),
+    )
+    avatar = AkapuluAvatar(session_id=session_id)
+
+    pipeline = Pipeline([
+        transport.input(),
+        stt,
+        context_aggregator.user(),
+        llm,
+        tts,
+        avatar,  # Forwards assistant audio to the Akapulu Labs worker
+        transport.output(),
+        context_aggregator.assistant(),
+    ])
+```
+
+The browser joins with `browser_token`. When the Daily participant named
+`Avatar` joins, unsubscribe the voice bot from that microphone so it only hears
+the caller. The browser stays subscribed; that track is the voice the visitor
+hears.
+
+See the
+[foundational example](https://github.com/Akapulu/pipecat-akapulu/blob/main/examples/foundational.py)
+and [akapulu-examples](https://github.com/Akapulu/akapulu-examples) for a
+complete Daily pipeline.
+
+## Compatibility
+
+Tested with Pipecat v1.14.0 (Python 3.11+). Requires Pipecat 1.12.0 or newer.
+Check the [source repository](https://github.com/Akapulu/pipecat-akapulu) for
+the latest tested version and changelog.
